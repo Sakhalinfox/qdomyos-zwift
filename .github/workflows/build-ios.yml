@@ -1,0 +1,94 @@
+name: Build iOS IPA
+
+on:
+  workflow_dispatch:
+
+jobs:
+  ios-build:
+    runs-on: macos-14
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout submodule repo
+        uses: actions/checkout@v4
+        with:
+          repository: bluetiger9/SmtpClient-for-Qt
+          path: "src/smtpclient/"
+          ref: 3fa4a0fe5797070339422cf18b5e9ed8dcb91f9c
+
+      - name: Checkout googletest
+        uses: actions/checkout@v4
+        with:
+          repository: google/googletest
+          path: "tst/googletest/"
+          ref: "release-1.12.1"
+
+      - name: Install Qt iOS
+        uses: jurplel/install-qt-action@v3
+        with:
+          version: '5.15.2'
+          host: 'mac'
+          target: 'ios'
+          modules: 'qtcharts qtnetworkauth'
+          dir: '${{ github.workspace }}/output/ios/'
+          cache: 'true'
+          cache-key-prefix: 'install-qt-action-ios'
+
+      - name: Fix Qt tools and configuration
+        run: |
+          find ${{ github.workspace }}/output/ios/ -name 'devices.py' -exec sed -i '' 's/\/usr\/bin\/python/\/usr\/bin\/python3/g' {} \;
+          find ./ -name 'qdomyos-zwift-lib.pro' -exec sed -i '' 's/TARGET = qdomyos-zwift/TARGET = qdomyoszwift/g' {} \;
+
+      - name: Patch Qt for Bluetooth
+        run: cp qt-patches/ios/5.15.2/binary/*.* ${{ github.workspace }}/output/ios/Qt/5.15.2/ios/lib/
+
+      - name: Generate Dummy Secrets & Configure Proj
+        run: |
+          cd src
+          echo "#define STRAVA_SECRET_KEY \"\"" > secret.h
+          echo "#define PELOTON_SECRET_KEY \"\"" >> secret.h
+          echo "#define SMTP_USERNAME \"\"" >> secret.h
+          echo "#define SMTP_PASSWORD \"\"" >> secret.h
+          echo "#define SMTP_SERVER \"\"" >> secret.h
+          echo "#define INTERVALSICU_CLIENT_ID \"\"" >> secret.h
+          echo "#define INTERVALSICU_CLIENT_SECRET \"\"" >> secret.h
+          echo "" >> inner_templates/googlemaps/cesium-key.js
+          cd ..
+
+      - name: Generate Xcode Project via QMake
+        run: |
+          export PATH="${{ github.workspace }}/output/ios/Qt/5.15.2/ios/bin:$PATH"
+          qmake -spec macx-ios-clang CONFIG+=release CONFIG+=iphoneos qdomyos-zwift.pro
+
+      - name: Build with Xcode (Physical Device Target)
+        run: |
+          XCODEPROJ=$(find . -maxdepth 2 -name "*.xcodeproj" | head -n 1)
+          echo "Building $XCODEPROJ..."
+          xcodebuild build \
+            -project "$XCODEPROJ" \
+            -scheme qdomyos-zwift \
+            -configuration Release \
+            -sdk iphoneos \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY=""
+
+      - name: Package Payload into IPA
+        run: |
+          mkdir -p Payload
+          APP_PATH=$(find ~/Library/Developer/Xcode/DerivedData -name "*.app" -type d | grep "Release-iphoneos" | head -n 1)
+          if [ -z "$APP_PATH" ]; then
+            APP_PATH=$(find . -name "*.app" -type d | grep "Release-iphoneos" | head -n 1)
+          fi
+          echo "Found App bundle at: $APP_PATH"
+          cp -r "$APP_PATH" Payload/
+          zip -r qz-ios-device.ipa Payload
+
+      - name: Upload iOS IPA Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: qz-ios-device-ipa
+          path: qz-ios-device.ipa
