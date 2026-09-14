@@ -59,32 +59,46 @@ jobs:
           mkdir -p inner_templates/googlemaps
           touch inner_templates/googlemaps/cesium-key.js
           cd ..
-
+  
       - name: Generate and Patch Xcode Project
         run: |
           export PATH="${{ github.workspace }}/output/ios/Qt/5.15.2/ios/bin:$PATH"
           qmake -spec macx-ios-clang CONFIG+=release CONFIG+=iphoneos qdomyos-zwift.pro
-          
-          # Fix Xcode Project Format compatibility (objectVersion 70 -> 56)
-          find . -name "*.pbxproj" -exec sed -i '' 's/objectVersion = 70;/objectVersion = 56;/g' {} +
+      
+          # Compatibility fixes for Xcode 15.4 (remove Xcode 16 synchronized groups)
+          find . -name "*.pbxproj" -print0 | while IFS= read -r -d '' f; do
+            echo "Patching $f"
+            # Downgrade object version
+            sed -i '' 's/objectVersion = [0-9]*;/objectVersion = 56;/g' "$f"
+            # Convert synchronized groups back to normal groups
+            sed -i '' 's/PBXFileSystemSynchronizedRootGroup/PBXGroup/g' "$f"
+            # Remove properties that Xcode 15 does not understand
+            sed -i '' '/fileSystemSynchronizedGroups = /d' "$f"
+            sed -i '' '/preferredProjectObjectVersion = /d' "$f"
+            sed -i '' '/minimizedProjectReferenceProxies = /d' "$f"
+          done
+      
+          echo "=== Verification ==="
+          find . -name "*.pbxproj" -exec grep -H "objectVersion\|PBXFileSystemSynchronized\|PBXGroup" {} \; | head -30
 
       - name: Build with Xcode
         run: |
           XCODE_PROJ=$(find . -maxdepth 2 -name "*.xcodeproj" | head -n 1)
           echo "Found project: $XCODE_PROJ"
-          
-          # Inspect schemes available
+      
+          # List schemes (this should now succeed)
           xcodebuild -list -project "$XCODE_PROJ"
-          
-          # Build physical iOS ARM64 target
+      
+          # Build for physical device (ARM64)
           xcodebuild clean build \
             -project "$XCODE_PROJ" \
-            -alltargets \
+            -scheme qdomyoszwift \
             -configuration Release \
             -sdk iphoneos \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGN_IDENTITY=""
+            CODE_SIGN_IDENTITY="" \
+            ONLY_ACTIVE_ARCH=NO
 
       - name: Package Payload into IPA
         run: |
