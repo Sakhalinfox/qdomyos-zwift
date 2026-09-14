@@ -12,7 +12,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Checkout submodule repo
+      - name: Select Xcode 15.4
+        run: sudo xcode-select -s /Applications/Xcode_15.4.app/Contents/Developer
+
+      - name: Checkout submodules
         uses: actions/checkout@v4
         with:
           repository: bluetiger9/SmtpClient-for-Qt
@@ -37,38 +40,13 @@ jobs:
           cache: 'true'
           cache-key-prefix: 'install-qt-action-ios'
 
-      - name: Fix Qt tools and configuration
+      - name: Patch Qt Configuration
         run: |
           find ${{ github.workspace }}/output/ios/ -name 'devices.py' -exec sed -i '' 's/\/usr\/bin\/python/\/usr\/bin\/python3/g' {} \;
           find ./ -name 'qdomyos-zwift-lib.pro' -exec sed -i '' 's/TARGET = qdomyos-zwift/TARGET = qdomyoszwift/g' {} \;
+          cp qt-patches/ios/5.15.2/binary/*.* ${{ github.workspace }}/output/ios/Qt/5.15.2/ios/lib/ || true
 
-      - name: Patch Qt for Bluetooth
-        run: cp qt-patches/ios/5.15.2/binary/*.* ${{ github.workspace }}/output/ios/Qt/5.15.2/ios/lib/
-
-      - name: Setup ccache
-        run: |
-          brew install ccache
-          echo "CCACHE_DIR=${{ github.workspace }}/.ccache" >> $GITHUB_ENV
-          ccache --set-config=max_size=2G
-          ccache --set-config=compression=true
-          ccache --set-config=compression_level=6
-          ccache --set-config=base_dir=${{ github.workspace }}
-          ccache --set-config=sloppiness=pch_defines,time_macros,include_file_mtime,file_macro,clang_index_store
-          ccache --zero-stats
-          mkdir -p /tmp/ccache-wrappers
-          printf '#!/bin/bash\nexec /opt/homebrew/bin/ccache clang "$@"\n' > /tmp/ccache-wrappers/clang
-          printf '#!/bin/bash\nexec /opt/homebrew/bin/ccache clang++ "$@"\n' > /tmp/ccache-wrappers/clang++
-          chmod +x /tmp/ccache-wrappers/clang /tmp/ccache-wrappers/clang++
-
-      - name: Restore ccache
-        uses: actions/cache@v4
-        with:
-          path: .ccache
-          key: ccache-ios-${{ hashFiles('src/**/*.cpp', 'src/**/*.h', 'src/*.pro') }}
-          restore-keys: |
-            ccache-ios-
-
-      - name: Generate Secrets & Build
+      - name: Generate Dummy Headers
         run: |
           cd src
           echo "#define STRAVA_SECRET_KEY \"\"" > secret.h
@@ -78,22 +56,47 @@ jobs:
           echo "#define SMTP_SERVER \"\"" >> secret.h
           echo "#define INTERVALSICU_CLIENT_ID \"\"" >> secret.h
           echo "#define INTERVALSICU_CLIENT_SECRET \"\"" >> secret.h
-          echo "" >> inner_templates/googlemaps/cesium-key.js
+          mkdir -p inner_templates/googlemaps
+          touch inner_templates/googlemaps/cesium-key.js
           cd ..
-          
+
+      - name: Generate and Patch Xcode Project
+        run: |
           export PATH="${{ github.workspace }}/output/ios/Qt/5.15.2/ios/bin:$PATH"
-          qmake CONFIG+=release CONFIG+=iphoneos qdomyos-zwift.pro
-          make -j$(sysctl -n hw.ncpu)
+          qmake -spec macx-ios-clang CONFIG+=release CONFIG+=iphoneos qdomyos-zwift.pro
+          
+          # Fix Xcode Project Format compatibility (objectVersion 70 -> 56)
+          find . -name "*.pbxproj" -exec sed -i '' 's/objectVersion = 70;/objectVersion = 56;/g' {} +
+
+      - name: Build with Xcode
+        run: |
+          XCODE_PROJ=$(find . -maxdepth 2 -name "*.xcodeproj" | head -n 1)
+          echo "Found project: $XCODE_PROJ"
+          
+          # Inspect schemes available
+          xcodebuild -list -project "$XCODE_PROJ"
+          
+          # Build physical iOS ARM64 target
+          xcodebuild clean build \
+            -project "$XCODE_PROJ" \
+            -alltargets \
+            -configuration Release \
+            -sdk iphoneos \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY=""
 
       - name: Package Payload into IPA
         run: |
           mkdir -p Payload
-          APP_DIR=$(find . -name "*.app" -type d | grep -E "Release-iphoneos|release-iphoneos|\.app$" | head -n 1)
-          if [ -z "$APP_DIR" ]; then
-            APP_DIR=$(find . -name "*.app" -type d | head -n 1)
+          # Locate the compiled .app bundle anywhere in build or DerivedData
+          APP_PATH=$(find ~/Library/Developer/Xcode/DerivedData . -name "*.app" -type d | grep -i "Release-iphoneos" | head -n 1)
+          if [ -z "$APP_PATH" ]; then
+            APP_PATH=$(find . -name "*.app" -type d | head -n 1)
           fi
-          echo "Packaging application found at: $APP_DIR"
-          cp -r "$APP_DIR" Payload/
+          
+          echo "Using App bundle: $APP_PATH"
+          cp -r "$APP_PATH" Payload/
           zip -r qz-ios-device.ipa Payload
 
       - name: Upload iOS IPA Artifact
